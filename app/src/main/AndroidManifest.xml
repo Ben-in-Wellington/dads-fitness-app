@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- ================================================================== -->
+    <!--                            PERMISSIONS                             -->
+    <!-- ================================================================== -->
+    <!-- Required for streaming radio and connecting to Gemini Live API -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- Required to capture audio from the microphone for the AI Trainer -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!-- Required for the "Help Button" to send an SMS -->
+    <uses-permission android:name="android.permission.SEND_SMS" />
+
+    <!-- Required for the Radio Player to run as a foreground service -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+
+    <!-- Required on Android 13+ to show notifications for foreground services -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+
+    <!-- Required for Bluetooth scanning and connection -->
+    <uses-permission android:name="android.permission.BLUETOOTH" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
+    <!-- Required for Android 6.0+ -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <!-- Required for Android 10+ -->
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+    <!-- Required for Android 12+ -->
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+
+    <!-- Add this feature declaration -->
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
+
+    <!-- ================================================================== -->
+    <!--                            APPLICATION                             -->
+    <!-- ================================================================== -->
+    <application
+        android:name=".FitnessApplication"
+        android:allowBackup="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.FitRic"
+        tools:targetApi="34">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:screenOrientation="landscape"
+            android:theme="@style/Theme.FitRic">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+         Declares the RadioService for the streaming audio player.
+         This service will run in the background to keep the music playing.
+        -->
+        <!-- Note: The 'android:name' attribute will need to match the full package path
+             of your RadioService class once you create it, for example:
+             android:name="com.yourcompany.dadsfitness.feature.audio.RadioService"
+             For now, using a relative path is okay.
+        -->
+        <service
+            android:name="com.di.feature_audio.RadioService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback">
+            <intent-filter>
+                <action android:name="androidx.media3.session.MediaSessionService" />
+            </intent-filter>
+        </service>
+
+    </application>
+
+</manifest>

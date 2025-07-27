@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Permissions declared in the main AndroidManifest.xml apply to all modules.
+         These are redundant here and have been removed for cleanliness.
+         The core permissions for network and audio are already in your main manifest. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+</manifest>
