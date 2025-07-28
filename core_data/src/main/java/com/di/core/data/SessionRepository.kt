@@ -143,6 +143,8 @@ interface SessionRepository {
      */
     suspend fun deleteUserData(userId: Long)
 
+    suspend fun getSurveyResponses(sessionId: Long): Map<String, String>
+
     /**
      * Gets a reactive Flow of the overall session summary for a user.
      * This will automatically emit new summary data whenever the user's session history changes.

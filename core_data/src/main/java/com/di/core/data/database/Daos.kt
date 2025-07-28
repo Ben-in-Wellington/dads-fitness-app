@@ -373,6 +373,14 @@ interface SurveyResponseDao {
     suspend fun insertResponse(response: SurveyResponseEntity)
 
     /**
+     * Retrieves all survey responses for a specific session.
+     * @param sessionId The ID of the session.
+     * @return A list of [SurveyResponseEntity] for the given session.
+     */
+    @Query("SELECT * FROM survey_responses WHERE sessionId = :sessionId")
+    suspend fun getResponsesForSession(sessionId: Long): List<SurveyResponseEntity>
+
+    /**
      * Deletes all survey responses associated with a specific user.
      * @param userId The ID of the user whose survey responses should be deleted.
      */

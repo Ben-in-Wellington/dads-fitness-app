@@ -4,8 +4,10 @@ package com.di.core.data
 
 import com.di.core.data.database.* // Import all entities and DAOs
 import com.di.core.data.database.SessionSummaryRaw // Ensure this import is correct
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -20,6 +22,7 @@ class SessionRepositoryImpl @Inject constructor(
     private val surveyDao: SurveyResponseDao,
     private val cadenceDao: CadenceDataDao,
     private val settingsRepository: SettingsRepository,
+    private val surveyResponseDao: SurveyResponseDao, // Make sure this is here
 ) : SessionRepository {
 
     /**
@@ -169,6 +172,13 @@ class SessionRepositoryImpl @Inject constructor(
 
     override fun getTodayStatsFlow(userId: Long) =
         sessionDao.getTodayStatsFlow(userId)
+
+    override suspend fun getSurveyResponses(sessionId: Long): Map<String, String> {
+        return withContext(Dispatchers.IO) {
+            surveyResponseDao.getResponsesForSession(sessionId)
+                .associate { it.question to it.response }
+        }
+    }
 
     /**
      * Retrieves an aggregated summary of all sessions for a given user.

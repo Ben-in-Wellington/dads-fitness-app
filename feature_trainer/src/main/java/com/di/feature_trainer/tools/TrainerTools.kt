@@ -70,12 +70,10 @@ class TrainerTools @Inject constructor(
                 "lookup_session_history" -> lookupSessionHistory(call)
                 "add_trainer_note" -> addTrainerNote(call)
                 "get_trainer_notes" -> getTrainerNotes(call)
-                "send_progress_email" -> sendProgressEmail(call)
-                // If the AI requests an unknown function, return an error response.
-                else -> errorResponse(call.id, "Unknown function: ${call.name}. This function is not implemented.")
+                "start_workout_session" -> startWorkoutSession(call)  // Add this
+                else -> errorResponse(call.id, "Unknown function: ${call.name}")
             }
         }
-        // Return a single ToolResponse containing all the individual function responses.
         return ToolResponse(functionResponses = functionResponses)
     }
 
@@ -171,36 +169,71 @@ class TrainerTools @Inject constructor(
      *         no active user is found or retrieval fails.
      */
     private suspend fun getTrainerNotes(call: FunctionCall): FunctionResponse {
-        // Ensure an active user is available to retrieve notes for.
         val userId = userManager.activeUser.first()?.id
             ?: return errorResponse(call.id, "No active user found to retrieve trainer notes.")
 
         return try {
-            // Retrieve all notes for the user, collecting the first emission from the Flow.
-            val notes = trainerNoteDao.getAllNotes(userId).first()
-            // Build a JSON array containing summary data for each note.
+            val allNotes = trainerNoteDao.getAllNotes(userId).first()
+
+            val notesToReturn = when {
+                allNotes.size <= 20 -> allNotes
+                else -> {
+                    val firstFive = allNotes.take(5)
+                    val recentFifteen = allNotes.takeLast(15)
+                    (firstFive + recentFifteen).distinctBy { it.id }
+                }
+            }
+
             val notesData = buildJsonArray {
-                notes.forEach { note ->
+                notesToReturn.forEach { note ->
                     add(buildJsonObject {
                         put("date", JsonPrimitive(formatDate(note.timestamp)))
                         put("time", JsonPrimitive(formatTime(note.timestamp)))
                         put("note", JsonPrimitive(note.note))
+                        put("is_early_note", JsonPrimitive(allNotes.indexOf(note) < 5))
                     })
                 }
             }
-            // Return a successful FunctionResponse with the notes data and total count.
+
             FunctionResponse(
                 id = call.id,
                 name = call.name,
                 response = mapOf(
-                    "notes" to notesData, // The actual notes data as a JSON array
-                    "total_count" to JsonPrimitive(notes.size) // Total number of notes returned
+                    "notes" to notesData,
+                    "displayed_count" to JsonPrimitive(notesToReturn.size),
+                    "total_count" to JsonPrimitive(allNotes.size),
+                    "note" to JsonPrimitive(
+                        if (allNotes.size > 20)
+                            "Showing first 5 notes plus 15 most recent. Total notes: ${allNotes.size}"
+                        else
+                            "Showing all notes"
+                    )
                 )
             )
         } catch (e: Exception) {
-            // Return an error response if retrieval fails.
             errorResponse(call.id, "Failed to retrieve notes: ${e.message}")
         }
+    }
+
+    private suspend fun startWorkoutSession(call: FunctionCall): FunctionResponse {
+        val readinessConfirmed = (call.args?.get("readiness_confirmed") as? JsonPrimitive)
+            ?.content?.toBooleanStrictOrNull() ?: false
+
+        if (!readinessConfirmed) {
+            return errorResponse(
+                call.id,
+                "Cannot start session without countdown and readiness confirmation"
+            )
+        }
+
+        return FunctionResponse(
+            id = call.id,
+            name = call.name,
+            response = mapOf(
+                "result" to JsonPrimitive("start_session_requested"),
+                "message" to JsonPrimitive("Starting workout session...")
+            )
+        )
     }
 
     /**

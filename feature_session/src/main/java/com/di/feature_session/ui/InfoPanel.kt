@@ -192,8 +192,9 @@ fun ProgressCard(stats: TodayStats?, modifier: Modifier = Modifier) {
 @Composable
 private fun SettingsAndHelpButtons(
     onNavigateToSettings: () -> Unit,
-    onHelpClick: () -> Unit
+    onHelpClick: () -> Unit // The onHelpClick parameter is now unused but can be left for now
 ) {
+    // This is the "Settings" button, which we are keeping.
     Button(
         onClick = onNavigateToSettings,
         modifier = Modifier
@@ -209,23 +210,15 @@ private fun SettingsAndHelpButtons(
         Text("Settings", fontSize = 16.sp)
     }
 
-    Spacer(Modifier.height(8.dp))
-
-    OutlinedButton(
-        onClick = onHelpClick,
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(48.dp),
-        colors = ButtonDefaults.outlinedButtonColors(
-            contentColor = MaterialTheme.colorScheme.error
-        ),
-        border = ButtonDefaults.outlinedButtonBorder.copy(width = 2.dp),
-        shape  = RoundedCornerShape(8.dp)
-    ) {
-        Icon(Icons.Default.Emergency, null)
-        Spacer(Modifier.width(8.dp))
-        Text("HELP", fontSize = 16.sp, fontWeight = FontWeight.Bold)
-    }
+    // The Spacer and the OutlinedButton for "HELP" have been removed.
+    // Spacer(Modifier.height(8.dp))
+    //
+    // OutlinedButton(
+    //     onClick = onHelpClick,
+    //     ...
+    // ) {
+    //     ...
+    // }
 }
 
 /* ─────────────────────────────────────────────────────────────── */

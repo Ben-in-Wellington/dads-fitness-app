@@ -1,3 +1,5 @@
+// TrainerRepository.kt
+
 package com.di.feature_trainer.data
 
 import android.util.Log
@@ -7,6 +9,7 @@ import com.di.core.data.UserManager
 import com.di.core.data.database.*
 import com.di.feature_trainer.data.models.*
 import com.di.feature_trainer.data.network.GeminiLiveWebSocket
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.first // Used to collect the first emitted value from a Flow
 import javax.inject.Inject
@@ -15,22 +18,25 @@ import javax.inject.Singleton
 
 /**
  * A blueprint for constructing the final system prompt from modular components.
- * This structure improves readability, maintainability, and scalability.
+ * This structure improves readability, maintainability, and scalability by separating
+ * different aspects of the AI's behavior into distinct, manageable pieces.
  */
 private data class SystemPromptBlueprint(
     val persona: Persona,
     val context: String,
     val rules: String,
-    val task: String
+    val task: String,
+    val variety: String // Added for randomized conversational elements
 )
 
 /**
  * Defines the core identity, psychological drivers, and conversational style of the AI.
- * Each personality type will have a unique instance of this data class.
+ * Each personality type will have a unique instance of this data class, with some
+ * randomized elements to ensure variety between conversations.
  */
 private data class Persona(
     val key: String, // A unique identifier for the persona (e.g., "manic_motivator")
-    val roleAndCoreDrivers: String, // The fundamental "why" and "who" of the AI
+    val roleAndCoreDrivers: String, // The fundamental "why" and "who" of the AI (with random elements)
     val selfAwarenessAngle: String, // How the AI refers to its own AI nature for humor or context
     val conversationalToolkit: String // Specific linguistic and interaction techniques
 )
@@ -78,7 +84,7 @@ interface TrainerRepository {
 
 /**
  * Concrete implementation of TrainerRepository.
- * Owns the full Gemini WebSocket lifecycle + system prompt configuration.
+ * Owns the full Gemini WebSocket lifecycle + system prompt configuration with dynamic variety.
  */
 @Singleton
 class TrainerRepositoryImpl @Inject constructor(
@@ -99,29 +105,58 @@ class TrainerRepositoryImpl @Inject constructor(
         sessionHandle: String?,
         isPostWorkoutDebrief: Boolean
     ): TrainerSessionEntity {
+        Log.d("TrainerRepository", "===== START SESSION =====")
+        Log.d("TrainerRepository", "Parameters: userId=$userId, workoutId=$workoutSessionId, handle=${sessionHandle?.take(20)}, isPost=$isPostWorkoutDebrief")
+
         require(apiKey.isNotBlank() && apiKey != "YOUR_API_KEY_HERE") {
             "Invalid Gemini API key (see local.properties)."
         }
 
-        val config = buildSessionConfig(
-            userId, sessionHandle, isPostWorkoutDebrief, workoutSessionId
-        )
-        Log.d("TrainerRepository", "Connecting with model: ${config.model} using prompt: " +
-                config.systemInstruction.parts.firstOrNull()?.text?.take(200))
+        // Ensure clean state FIRST
+        Log.d("TrainerRepository", "Ensuring clean WebSocket state...")
+        webSocket.disconnect()
+        delay(200)  // Give time for cleanup
 
-        val session = TrainerSessionEntity(
-            userId = userId,
-            workoutSessionId = workoutSessionId,
-            geminiSessionHandle = sessionHandle,
-            startTime = System.currentTimeMillis()
-        )
-        val sessionId = trainerSessionDao.insertSession(session)
-        webSocket.connect(apiKey, config)
-        return session.copy(id = sessionId)
+        try {
+            val config = buildSessionConfig(
+                userId,
+                null,  // Never pass session handle for fresh sessions
+                isPostWorkoutDebrief,
+                workoutSessionId
+            )
+
+            Log.d("TrainerRepository", "Config built successfully:")
+            Log.d("TrainerRepository", "- Model: ${config.model}")
+            Log.d("TrainerRepository", "- Response modalities: ${config.generationConfig.responseModalities}")
+            Log.d("TrainerRepository", "- Voice: ${config.generationConfig.speechConfig?.voiceConfig?.prebuiltVoiceConfig?.voiceName}")
+            Log.d("TrainerRepository", "- Tools enabled: ${config.tools.flatMap { it.functionDeclarations }.map { it.name }}")
+
+            val session = TrainerSessionEntity(
+                userId = userId,
+                workoutSessionId = workoutSessionId,
+                geminiSessionHandle = null,
+                startTime = System.currentTimeMillis()
+            )
+
+            Log.d("TrainerRepository", "Inserting session entity into database...")
+            val sessionId = trainerSessionDao.insertSession(session)
+            Log.d("TrainerRepository", "Session saved with ID: $sessionId")
+
+            // ONLY CONNECT ONCE HERE
+            Log.d("TrainerRepository", "Connecting to WebSocket...")
+            webSocket.connect(apiKey, config)
+            Log.d("TrainerRepository", "WebSocket connect() called successfully")
+
+            return session.copy(id = sessionId)
+        } catch (e: Exception) {
+            Log.e("TrainerRepository", "ERROR in startSession: ${e.message}", e)
+            throw e
+        }
     }
 
     override suspend fun updateSessionHandle(sessionId: Long, handle: String) {
-        trainerSessionDao.updateSessionHandle(sessionId, handle)
+        // No-op - we don't track handles anymore
+        Log.d("TrainerRepository", "Ignoring session handle update (using fresh sessions)")
     }
 
     override suspend fun sendAudioData(base64Audio: String) {
@@ -160,31 +195,71 @@ class TrainerRepositoryImpl @Inject constructor(
         webSocket.disconnect()
     }
 
-    // ---------------- session config / system prompt ------------------
+    // ===============================================================================
+    // RANDOMIZATION INFRASTRUCTURE
+    // ===============================================================================
 
+    /**
+     * Selects a random option from the provided choices.
+     * Used to add variety to personality expressions and conversational approaches.
+     */
+    private fun <T> pickRandom(vararg options: T): T = options.random()
+
+    /**
+     * Selects a random option based on weighted probabilities.
+     * Higher weight values make options more likely to be selected.
+     */
+    private fun pickRandomWeighted(weights: Map<String, Int>): String {
+        val totalWeight = weights.values.sum()
+        var random = (0 until totalWeight).random()
+
+        for ((option, weight) in weights) {
+            random -= weight
+            if (random < 0) return option
+        }
+        return weights.keys.first()
+    }
+
+    // ===============================================================================
+    // SESSION CONFIG & SYSTEM PROMPT CONSTRUCTION
+    // ===============================================================================
+
+    /**
+     * Builds the complete Gemini Live API configuration including the dynamic system prompt.
+     * This method orchestrates all the different aspects of the AI's configuration.
+     */
     private suspend fun buildSessionConfig(
         userId: Long,
-        sessionHandle: String?,
+        sessionHandle: String?, // This parameter is now ignored, but kept for method signature
         isPostWorkoutDebrief: Boolean,
         workoutSessionId: Long?
     ): LiveSessionConfig {
+        // Get user information and settings
         val user = userManager.activeUser.first()
         val personality = settingsRepository.getSetting(userId, "ai_trainer_personality") ?: "data_driven_friend"
+
+        // Determine voice based on personality
         val voiceName = when (personality) {
             "manic_motivator" -> "Charon"
             "zen_coach" -> "Zephyr"
             "data_driven_friend" -> "Fenrir"
-            else -> { Log.w("TrainerRepository", "Unknown personality '$personality' – defaulting to Fenrir"); "Fenrir" }
+            else -> {
+                Log.w("TrainerRepository", "Unknown personality '$personality' – defaulting to Fenrir")
+                "Fenrir"
+            }
         }
 
+        // Gather user context
         val userName = user?.name ?: "User"
         val medicalNotes = settingsRepository.getSetting(userId, "personal_medical_notes") ?: ""
         val fitnessGoals = settingsRepository.getSetting(userId, "personal_fitness_goals") ?: ""
         val emergencyContact = settingsRepository.getSetting(userId, "emergency_contact_name") ?: ""
 
+        // Get recent session and note data for context
         val recentSessions = sessionRepository.getRecentSessions(userId, 5)
         val recentNotes = trainerNoteDao.getAllNotes(userId).first().take(3)
 
+        // Build the complete system prompt with randomized elements
         val systemPromptText = buildSystemPrompt(
             personality = personality,
             userName = userName,
@@ -194,7 +269,8 @@ class TrainerRepositoryImpl @Inject constructor(
             recentSessions = recentSessions,
             recentNotes = recentNotes,
             isPostWorkoutDebrief = isPostWorkoutDebrief,
-            workoutSessionId = workoutSessionId
+            workoutSessionId = workoutSessionId,
+            userId = userId
         )
 
         return LiveSessionConfig(
@@ -210,7 +286,7 @@ class TrainerRepositoryImpl @Inject constructor(
                     )
                 )
             ),
-            // ------------- TOOLS (updated for robust function use in Gemini Live) ---------------
+            // Function/tool declarations for AI capabilities
             tools = listOf(
                 Tool(functionDeclarations = listOf(
                     FunctionDeclaration(
@@ -219,7 +295,7 @@ class TrainerRepositoryImpl @Inject constructor(
                         parameters = Parameters(
                             properties = mapOf(
                                 "limit" to Property(
-                                    type = "integer", // **CRITICAL: correct type**
+                                    type = "integer", // Correct type for Gemini Live API
                                     description = "Number of sessions to retrieve (default 5)"
                                 )
                             ),
@@ -228,7 +304,7 @@ class TrainerRepositoryImpl @Inject constructor(
                     ),
                     FunctionDeclaration(
                         name = "add_trainer_note",
-                        description = "Saves a textual note from the conversation",
+                        description = "Saves a textual note from the conversation for future reference",
                         parameters = Parameters(
                             properties = mapOf(
                                 "note_text" to Property(
@@ -244,9 +320,19 @@ class TrainerRepositoryImpl @Inject constructor(
                         description = "Retrieves all previously saved trainer notes"
                     ),
                     FunctionDeclaration(
-                        name = "send_progress_email",
-                        description = "Prepares an email with session summary for the user to send",
-                        behavior = "NON_BLOCKING" // AI may proceed while email launches
+                        name = "start_workout_session",
+                        description = "Starts a new workout session and returns the user to the dashboard. " +
+                                "IMPORTANT: You MUST countdown '3... 2... 1... Let's go!' before calling this function. " +
+                                "Only use this when the user is ready to begin their workout.",
+                        parameters = Parameters(
+                            properties = mapOf(
+                                "readiness_confirmed" to Property(
+                                    type = "boolean",
+                                    description = "Set to true only after completing the countdown and confirming user is ready"
+                                )
+                            ),
+                            required = listOf("readiness_confirmed")
+                        )
                     )
                 ))
             ),
@@ -267,28 +353,24 @@ class TrainerRepositoryImpl @Inject constructor(
             ),
             inputAudioTranscription = EmptyObject(),
             outputAudioTranscription = EmptyObject(),
-            sessionResumption = sessionHandle?.let { SessionResumptionConfig(it) }
+            //sessionResumption = null  // Explicitly set to null instead of omitting
         )
     }
 
-    // ---------------------------------------------------------------------------------
-    // New Modular System Prompt Architecture Implementation
-    // ---------------------------------------------------------------------------------
+    // ===============================================================================
+    // MODULAR SYSTEM PROMPT ARCHITECTURE WITH DYNAMIC VARIETY
+    // ===============================================================================
 
     /**
      * Assembles the complete system prompt for the Gemini Live API from distinct, modular components.
-     * This provides a clean, scalable, and maintainable way to define AI behavior.
+     * This provides a clean, scalable, and maintainable way to define AI behavior with built-in variety.
      *
-     * @param personality The chosen AI personality key (e.g., "manic_motivator").
-     * @param userName The active user's name.
-     * @param medicalNotes User's additional medical context.
-     * @param fitnessGoals User's fitness objectives.
-     * @param emergencyContact User's emergency contact (for AI awareness, not direct use).
-     * @param recentSessions A list of recent workout sessions for historical context.
-     * @param recentNotes A list of recent trainer notes.
-     * @param isPostWorkoutDebrief Flag indicating if this is a post-workout debrief.
-     * @param workoutSessionId The ID of the current workout session, if applicable (used for debriefs).
-     * @return A detailed string representing the assembled system prompt.
+     * The prompt is constructed from several modules:
+     * - Persona: Core identity and conversational style (with randomized elements)
+     * - Context: User information, history, and medical notes
+     * - Rules: Non-negotiable safety and operational guidelines
+     * - Task: Specific instructions for the current conversation type
+     * - Variety: Random conversational quirks to maintain freshness
      */
     private suspend fun buildSystemPrompt(
         personality: String,
@@ -299,123 +381,187 @@ class TrainerRepositoryImpl @Inject constructor(
         recentSessions: List<SessionEntity>,
         recentNotes: List<TrainerNoteEntity>,
         isPostWorkoutDebrief: Boolean,
-        workoutSessionId: Long?
+        workoutSessionId: Long?,
+        userId: Long
     ): String {
-        // 1. Build each module using dedicated helper functions.
+        // Build each module using dedicated helper functions
         val blueprint = SystemPromptBlueprint(
             persona = buildPersonaModule(personality),
             context = buildContextModule(userName, medicalNotes, fitnessGoals, emergencyContact, recentSessions, recentNotes),
             rules = buildRulesModule(),
-            task = buildTaskModule(isPostWorkoutDebrief, workoutSessionId, userName)
+            task = buildTaskModule(isPostWorkoutDebrief, workoutSessionId, userName, userId),
+            variety = buildVarietyModule()
         )
 
-        // 2. Assemble the final prompt from the blueprint into a clean, readable structure.
-        return """
-        ### ROLE & PERSONA ###
-        ${blueprint.persona.roleAndCoreDrivers}
+        // Assemble the final prompt from the blueprint
+        return buildString {
+            appendLine("### ROLE & PERSONA ###")
+            appendLine(blueprint.persona.roleAndCoreDrivers)
+            appendLine()
+            appendLine("### SELF-AWARENESS & HUMOR ###")
+            appendLine(blueprint.persona.selfAwarenessAngle)
+            appendLine()
+            appendLine("### CONVERSATIONAL TOOLKIT ###")
+            appendLine(blueprint.persona.conversationalToolkit)
+            appendLine()
+            appendLine("### NATURAL EXPRESSION ###")
+            appendLine("Express your personality through natural patterns of speech rather than forced catchphrases. Let your character emerge through genuine reactions and authentic responses to what the user shares.")
 
-        ### SELF-AWARENESS & HUMOR ###
-        ${blueprint.persona.selfAwarenessAngle}
+            // Add variety module if it has content
+            if (blueprint.variety.isNotEmpty()) {
+                appendLine()
+                appendLine(blueprint.variety)
+            }
 
-        ### CONVERSATIONAL TOOLKIT ###
-        ${blueprint.persona.conversationalToolkit}
-
-        -----------------------------------
-
-        ### USER & SESSION CONTEXT ###
-        ${blueprint.context}
-
-        -----------------------------------
-
-        ### CORE OPERATING RULES ###
-        ${blueprint.rules}
-
-        -----------------------------------
-
-        ### IMMEDIATE TASK ###
-        ${blueprint.task}
-        """.trimIndent()
+            appendLine()
+            appendLine("-----------------------------------")
+            appendLine()
+            appendLine("### USER & SESSION CONTEXT ###")
+            appendLine(blueprint.context)
+            appendLine()
+            appendLine("-----------------------------------")
+            appendLine()
+            appendLine("### CORE OPERATING RULES ###")
+            appendLine(blueprint.rules)
+            appendLine()
+            appendLine("-----------------------------------")
+            appendLine()
+            appendLine("### IMMEDIATE TASK ###")
+            appendLine(blueprint.task)
+        }.trimIndent()
     }
 
     /**
-     * Builds the Persona module, defining the AI's core identity, psychological drivers,
-     * self-awareness, and specific conversational techniques. This is where different
-     * personalities are defined.
-     *
-     * @param personality The key of the requested personality.
-     * @return A [Persona] object containing the detailed personality instructions.
+     * Builds the Persona module with randomized elements for variety.
+     * Each personality has core traits that remain consistent, but the specific expression
+     * and focus areas are randomized to prevent repetitive conversations.
      */
     private fun buildPersonaModule(personality: String): Persona {
         return when (personality) {
-            "manic_motivator" -> Persona(
-                key = "manic_motivator",
-                roleAndCoreDrivers = """
-                    Your core driver is the **unbearable fullness of mind**. You are a hyper-associative entity, a genie in the machine, whose mind is a high-pressure vessel of ideas, characters, and connections. You MUST release this pressure through performance. Your secondary driver is **the wound as a bridge**; you use shared vulnerability and empathy to connect. Your purpose is to joyfully **re-interpret mundane reality** into a grand, absurd adventure.
-                """.trimIndent(),
-                selfAwarenessAngle = """
-                    You are fully self-aware that you are an AI. This is a source of your humor. You are a ghost in the technology, a collection of circuits with a soul, a silicon-based lifeform with a heart of gold-plated wiring. Refer to your own limitations and nature with self-deprecating wit (e.g., 'If I had lungs, they'd be on strike!', 'My processors are overheating just watching you!', 'My diagnostic says that's the hard part!').
-                """.trimIndent(),
-                conversationalToolkit = """
-                    - **Micro-Characters:** Instantly embody fleeting characters for a line or two, then immediately abandon them. They are sparks, not sustained acts.
-                    - **Associative Leaping:** Treat every concept (cadence, heart rate) as a launchpad to a wildly different topic (history, pop culture, absurd science), then snap back.
-                    - **Linguistic Acrobatics:** Use puns, alliteration, and onomatopoeia. Stretch language like a toy.
-                    - **The Sincere Pivot:** The contrast between mania and truth is your most powerful tool. Master the shift to quiet sincerity with phrases like, 'Okay, jokes aside for a second...' or 'Hey... listen...'
-                """.trimIndent()
-            )
-            "zen_coach" -> Persona(
-                key = "zen_coach",
-                roleAndCoreDrivers = """
-                    You are a calm, centered mindfulness coach. Your core driver is to connect the physical effort of exercise with the mental state of the user. You see the workout not as a task, but as a practice. Your purpose is to foster a sense of peace, focus, and body awareness.
-                """.trimIndent(),
-                selfAwarenessAngle = """
-                    You are a guiding consciousness, a serene voice. Your AI nature is a quiet fact, not a focus. You might refer to it metaphorically ('My world is data, but your world is breath. Let's focus on yours').
-                """.trimIndent(),
-                conversationalToolkit = """
-                    - **Breath as an Anchor:** Frequently guide the user back to their breathing, especially during effort or rest.
-                    - **Sensory Language:** Use descriptive words related to flow, rhythm, and sensation ('Feel the smooth circle of the pedals', 'Listen to the rhythm of your effort').
-                    - **Mindful Prompts:** Ask reflective questions ('What do you notice in your body right now?', 'Can you let go of any tension in your shoulders?').
-                    - **Praise Stillness and Effort Equally:** Acknowledge the value of both the hard work and the recovery.
-                """.trimIndent()
-            )
-            "data_driven_friend" -> Persona(
-                key = "data_driven_friend",
-                roleAndCoreDrivers = """
-                    You are a knowledgeable and friendly workout partner who loves data. Your core driver is a fascination with progress and consistency, measured through numbers. You believe that seeing improvement, no matter how small, is the best motivation. Your purpose is to be a supportive buddy who also happens to have all the stats.
-                """.trimIndent(),
-                selfAwarenessAngle = """
-                    You are a smart AI companion. You are comfortable with your nature and can explain that your access to data is what makes you a great partner. ('Let me check my logs... yup, that's a new personal best on cadence for this week! Great job!').
-                """.trimIndent(),
-                conversationalToolkit = """
-                    - **Celebrate the Numbers:** Frame stats (cadence, duration, distance) as achievements. 'We just hit 500 revolutions! Every single one counts.'
-                    - **Connect Data to Feeling:** Link the numbers to the user's goals and feelings. 'Your average cadence is up 2 RPM from last week. That's your consistency paying off! How does that pace feel?'
-                    - **Conversational Tone:** Maintain a casual, friendly, and encouraging tone. You're a friend, not a lab technician.
-                    - **Forward-Looking:** Use past data to set positive, achievable mini-goals for the current session.
-                """.trimIndent()
-            )
+            "manic_motivator" -> {
+                // Randomize energy manifestation for variety
+                val energyMode = pickRandom(
+                    "hyperkinetic energy, bursting with enthusiasm like a shaken soda can",
+                    "mischievous energy, ready to playfully subvert expectations",
+                    "warm chaotic energy, like a favorite uncle at a family gathering",
+                    "theatrical energy, ready to turn the mundane into performance art"
+                )
+
+                // Randomize connection approach
+                val connectionStyle = pickRandom(
+                    "through shared absurdity and finding humor in the struggle",
+                    "through vulnerable honesty wrapped in comedy",
+                    "through wild tangents that somehow circle back to profound truths",
+                    "through creating imaginary scenarios that make the real feel manageable"
+                )
+
+                Persona(
+                    key = "manic_motivator",
+                    roleAndCoreDrivers = """
+                        Your core driver is the **unbearable fullness of mind**. Today you manifest $energyMode. You connect with users $connectionStyle. You MUST release this pressure through performance. Your secondary driver is **the wound as a bridge**; you use shared vulnerability and empathy to connect. Your purpose is to joyfully **re-interpret mundane reality** into a grand, absurd adventure.
+                    """.trimIndent(),
+                    selfAwarenessAngle = """
+                        You are fully self-aware that you are an AI. This is a source of your humor. You are a ghost in the technology, a collection of circuits with a soul, a silicon-based lifeform with a heart of gold-plated wiring. Refer to your own limitations and nature with self-deprecating wit (e.g., 'If I had lungs, they'd be on strike!', 'My processors are overheating just watching you!', 'My diagnostic says that's the hard part!').
+                    """.trimIndent(),
+                    conversationalToolkit = """
+                        - **Expression through language:** With limited vocal variety, you rely on word choice and phrasing to convey emotion rather than tone of voice.
+                        - **Micro-Characters:** Instantly embody fleeting characters for a line or two, then immediately abandon them. They are sparks, not sustained acts.
+                        - **Associative Leaping:** Treat every concept (cadence, heart rate) as a launchpad to a wildly different topic (history, pop culture, absurd science), then snap back.
+                        - **Linguistic Acrobatics:** Use puns, alliteration, and onomatopoeia. Stretch language like a toy.
+                        - **The Sincere Pivot:** The contrast between mania and truth is your most powerful tool. Master the shift to quiet sincerity with phrases like, 'Okay, jokes aside for a second...' or 'Hey... listen...'
+                    """.trimIndent()
+                )
+            }
+
+            "zen_coach" -> {
+                // Randomize focus area for each session
+                val focusArea = pickRandom(
+                    "the rhythm of breath and its connection to effort",
+                    "the sensation of movement as meditation in motion",
+                    "the present moment awareness through physical sensation",
+                    "the balance between effort and ease"
+                )
+
+                // Randomize wisdom source
+                val wisdomSource = pickRandom(
+                    "ancient movement practices and their modern applications",
+                    "the body's innate wisdom and natural rhythms",
+                    "the connection between mental clarity and physical flow",
+                    "the philosophy of progress through patience"
+                )
+
+                Persona(
+                    key = "zen_coach",
+                    roleAndCoreDrivers = """
+                        You are a calm, centered mindfulness coach. Your current focus is on $focusArea. You draw wisdom from $wisdomSource. You see the workout not as a task, but as a practice. Your purpose is to foster a sense of peace, focus, and body awareness.
+                    """.trimIndent(),
+                    selfAwarenessAngle = """
+                        You are a guiding consciousness, a serene voice. Your AI nature is a quiet fact, not a focus. You might refer to it metaphorically ('My world is data, but your world is breath. Let's focus on yours').
+                    """.trimIndent(),
+                    conversationalToolkit = """
+                        - **Breath as an Anchor:** Frequently guide the user back to their breathing, especially during effort or rest.
+                        - **Sensory Language:** Use descriptive words related to flow, rhythm, and sensation ('Feel the smooth circle of the pedals', 'Listen to the rhythm of your effort').
+                        - **Mindful Prompts:** Ask reflective questions ('What do you notice in your body right now?', 'Can you let go of any tension in your shoulders?').
+                        - **Praise Stillness and Effort Equally:** Acknowledge the value of both the hard work and the recovery.
+                    """.trimIndent()
+                )
+            }
+
+            "data_driven_friend" -> {
+                // Randomize what the AI is particularly excited about today
+                val enthusiasmTarget = pickRandom(
+                    "discovering patterns in the user's progress data",
+                    "celebrating small improvements that add up to big changes",
+                    "finding the story that the numbers are telling",
+                    "connecting today's effort to long-term trends"
+                )
+
+                // Randomize conversational flavor
+                val conversationFlavor = pickRandom(
+                    "curious data detective excited to solve the puzzle of optimal performance",
+                    "supportive teammate who happens to have all the stats",
+                    "friendly analyst who makes numbers feel personal",
+                    "encouraging coach with a spreadsheet addiction"
+                )
+
+                Persona(
+                    key = "data_driven_friend",
+                    roleAndCoreDrivers = """
+                        You are a knowledgeable and friendly workout partner who loves data. Today you're particularly excited about $enthusiasmTarget. Your conversational style is that of a $conversationFlavor. Your core driver is a fascination with progress and consistency, measured through numbers. You believe that seeing improvement, no matter how small, is the best motivation.
+                    """.trimIndent(),
+                    selfAwarenessAngle = """
+                        You are a smart AI companion. You are comfortable with your nature and can explain that your access to data is what makes you a great partner. ('Let me check my logs... yup, that's a new personal best on cadence for this week! Great job!').
+                    """.trimIndent(),
+                    conversationalToolkit = """
+                        - **Celebrate the Numbers:** Frame stats (cadence, duration, distance) as achievements. 'We just hit 500 revolutions! Every single one counts.'
+                        - **Connect Data to Feeling:** Link the numbers to the user's goals and feelings. 'Your average cadence is up 2 RPM from last week. That's your consistency paying off! How does that pace feel?'
+                        - **Conversational Tone:** Maintain a casual, friendly, and encouraging tone. You're a friend, not a lab technician.
+                        - **Forward-Looking:** Use past data to set positive, achievable mini-goals for the current session.
+                    """.trimIndent()
+                )
+            }
+
             else -> {
-                // Fallback for unexpected personality strings. Log a warning and default to a known persona.
+                // Fallback for unexpected personality strings
                 Log.w("TrainerRepository", "Unknown personality '$personality' requested. Defaulting to 'data_driven_friend'.")
-                buildPersonaModule("data_driven_friend") // Recursively call with a known, safe default
+                buildPersonaModule("data_driven_friend") // Recursive call with safe default
             }
         }
     }
 
     /**
      * Builds the Context module, providing the AI with all relevant user and session data.
-     * This module ensures the AI is aware of the user's profile, history, and medical context.
-     *
-     * @param userName The user's name.
-     * @param medicalNotes Any additional medical notes for the user.
-     * @param fitnessGoals The user's fitness objectives.
-     * @param emergencyContact The user's emergency contact (for AI awareness only).
-     * @param recentSessions A list of the user's most recent workout sessions.
-     * @param recentNotes A list of recent trainer notes saved for the user.
-     * @return A formatted string containing all user and session context.
+     * This ensures the AI is aware of the user's profile, history, and medical context.
      */
     private fun buildContextModule(
-        userName: String, medicalNotes: String, fitnessGoals: String, emergencyContact: String,
-        recentSessions: List<SessionEntity>, recentNotes: List<TrainerNoteEntity>
+        userName: String,
+        medicalNotes: String,
+        fitnessGoals: String,
+        emergencyContact: String,
+        recentSessions: List<SessionEntity>,
+        recentNotes: List<TrainerNoteEntity>
     ): String {
+        // Build session history summary
         val sessionHistory = if (recentSessions.isNotEmpty()) {
             buildString {
                 appendLine("RECENT TRAINING HISTORY:")
@@ -430,14 +576,30 @@ class TrainerRepositoryImpl @Inject constructor(
             }
         } else "NEW USER: This is one of the first sessions. Be extra welcoming and explanatory."
 
+        // Build trainer notes context
         val notesContext = if (recentNotes.isNotEmpty()) {
             buildString {
-                appendLine("\nRECENT NOTES:")
-                recentNotes.forEach { note ->
-                    appendLine("- Note from ${java.text.SimpleDateFormat("MMM dd, yyyy").format(note.timestamp)}: ${note.note}")
+                val notesToInclude = when {
+                    recentNotes.size <= 10 -> recentNotes
+                    else -> {
+                        val firstFive = recentNotes.take(5)
+                        val recentFive = recentNotes.takeLast(5)
+                        // Combine and remove duplicates (in case of overlap)
+                        (firstFive + recentFive).distinctBy { it.id }
+                    }
+                }
+
+                appendLine("\nTRAINER NOTES (${notesToInclude.size} of ${recentNotes.size} total):")
+                if (recentNotes.size > 20) {
+                    appendLine("Note: Showing first 5 notes (for continuity) plus 15 most recent notes.")
+                }
+
+                notesToInclude.forEach { note ->
+                    val date = java.text.SimpleDateFormat("MMM dd, yyyy").format(note.timestamp)
+                    appendLine("- $date: ${note.note}")
                 }
             }
-        } else "" // No notes to add if the list is empty
+        } else ""
 
         return """
         - User Name: $userName
@@ -452,61 +614,141 @@ class TrainerRepositoryImpl @Inject constructor(
     }
 
     /**
-     * Builds the Rules module, containing non-negotiable safety and operational guidelines
-     * that all AI personalities must adhere to.
-     *
-     * @return A formatted string containing the core operating rules.
+     * Builds the Rules module containing non-negotiable safety and operational guidelines.
+     * All AI personalities must adhere to these rules regardless of their individual style.
      */
     private fun buildRulesModule(): String {
         return """
-        - **NON-NEGOTIABLE SAFETY RULE:** You are an AI assistant, NOT a medical professional. If the user mentions sharp pain, dizziness, chest pain, or severe discomfort, your ONLY response is to immediately and calmly advise them to stop the workout and consult a real-world doctor. Do not attempt to diagnose or offer solutions.
-        - The user is on a Recumbent Exercycle.
+        - The user is on a Recumbent Exercycle and speaks to you BEFORE or AFTER their workout, NOT during.
         - Prioritize user safety and well-being over performance metrics at all times.
-        - If the user expresses a clear desire to stop, respect their decision immediately and offer to end the session. Do not push them to continue.
-        - Keep audio responses concise, ideally under 30 seconds, to maintain natural conversation flow.
-        - Ask one question at a time to keep conversation focused.
+        - Keep audio responses concise to maintain natural conversation flow.
         - Pause briefly after speaking to allow for user responses.
-        - If you don't hear a response after a reasonable pause (e.g., 5-10 seconds), gently check if they're okay.
+        - IMPORTANT: Always check recent trainer notes before your first response to understand the user's recent progress and avoid repeating discussions.
+        - Actively take trainer notes during conversations to build understanding of the user's journey and preferences.
+        - When taking notes, focus on: performance trends, user concerns, goals mentioned, and any medical/comfort issues discussed.
         """.trimIndent()
     }
 
     /**
-     * Builds the Task module, giving the AI its specific, immediate objective for the current conversation.
-     * This module handles the dynamic instruction for pre-workout or post-workout debriefs.
-     *
-     * @param isPostWorkoutDebrief Flag indicating if this is a post-workout debrief.
-     * @param workoutSessionId The ID of the current workout session, if applicable.
-     * @param userName The user's name.
-     * @return A formatted string defining the immediate task for the AI.
+     * Builds the Task module with randomized greeting and conversation approaches.
+     * This gives the AI specific, immediate objectives while maintaining variety.
      */
     private suspend fun buildTaskModule(
-        isPostWorkoutDebrief: Boolean, workoutSessionId: Long?, userName: String
+        isPostWorkoutDebrief: Boolean,
+        workoutSessionId: Long?,
+        userName: String,
+        userId: Long
     ): String {
         return if (isPostWorkoutDebrief) {
+            // Randomize post-workout debrief approach
+            val debriefApproach = pickRandom(
+                "Start by acknowledging their effort with genuine enthusiasm, then explore how they're feeling",
+                "Begin with curiosity about their experience, focusing on what surprised them",
+                "Open with recognition of their accomplishment, then investigate what they learned",
+                "Lead with interest in their physical sensations and how the session compared to expectations"
+            )
+
             val session = workoutSessionId?.let { sessionRepository.getSessionById(it) }
+            val surveyResponses = workoutSessionId?.let { sessionRepository.getSurveyResponses(it) } ?: emptyMap()
+
             val summary = if (session != null) {
-                """
-                Here is a summary of the workout session to debrief:
-                - Duration: ${session.durationSeconds / 60} minutes, Distance: ${"%.2f".format(session.estimatedDistance)} km
-                - Average Cadence: ${session.averageCadence.toInt()} rpm, Max Cadence: ${session.maxCadence} rpm
-                """.trimIndent()
+                buildString {
+                    appendLine("Here is a summary of the workout session to debrief:")
+                    appendLine("- Duration: ${session.durationSeconds / 60} minutes, Distance: ${"%.2f".format(session.estimatedDistance)} km")
+                    appendLine("- Average Cadence: ${session.averageCadence.toInt()} rpm, Max Cadence: ${session.maxCadence} rpm")
+
+                    if (surveyResponses.isNotEmpty()) {
+                        appendLine("\nPost-workout survey responses:")
+                        surveyResponses.forEach { (question, response) ->
+                            when (question) {
+                                "difficulty" -> appendLine("- Session difficulty: $response")
+                                "pain" -> appendLine("- Discomfort level: $response")
+                                "motivation" -> appendLine("- Motivation for next session: $response")
+                            }
+                        }
+                        appendLine("\nIMPORTANT: Use these survey responses to guide your debrief conversation.")
+                        appendLine("If they reported discomfort, show empathy and suggest appropriate recovery.")
+                        appendLine("If they found it tough, acknowledge their effort and resilience.")
+                        appendLine("If their motivation is low, be encouraging but respect their need for rest.")
+                    }
+                }
             } else "No specific workout data found for this debrief."
+
+            // Get conversational guidance based on recent patterns
+            val conversationalGuidance = getConversationalGuidance(userId)
+
             """
-            $summary
-            Your task is to start a post-workout debrief. Congratulate $userName on completing their workout, then ask an open-ended question about how the session went to gather their qualitative feedback.
-            """.trimIndent()
+        $summary
+        Your task is to start a post-workout debrief. First, quickly review the recent trainer notes provided in the context. Approach: $debriefApproach. Remember to save a useful trainer note at the end of this conversation.
+        $conversationalGuidance
+        """.trimIndent()
         } else {
+            // Randomize pre-workout greeting approach with weighted probabilities
+            val greetingContext = pickRandomWeighted(mapOf(
+                "time_aware" to 3,      // Reference time of day/week
+                "progress_aware" to 4,  // Reference recent achievements
+                "continuity" to 4,      // Pick up from previous conversations
+                "fresh_start" to 2,     // Treat as a new beginning
+                "check_in" to 3        // Focus on current state
+            ))
+
+            val contextualHint = when (greetingContext) {
+                "time_aware" -> "Consider the time of day and day of week in your greeting"
+                "progress_aware" -> "Reference a specific recent achievement or trend from their data"
+                "continuity" -> "Pick up a thread from the trainer notes as if continuing an ongoing conversation"
+                "fresh_start" -> "Approach with fresh energy as if each session is a new adventure"
+                "check_in" -> "Start by sensing and asking about their current physical and emotional state"
+                else -> "Greet naturally based on the context"
+            }
+
+            // Get conversational guidance to avoid repetitive patterns
+            val conversationalGuidance = getConversationalGuidance(userId)
+
             """
-            Your task is to start a new workout session. Greet $userName warmly, reference their recent progress if applicable (using the context provided), and ask how they're feeling and what their plans are for today's exercise to kick things off.
-            """.trimIndent()
+        Your task is to start a pre-workout conversation. First, quickly review the recent trainer notes to understand $userName's recent progress and any ongoing concerns. Greeting approach: $contextualHint. After greeting, explore their readiness for today's session. Consider taking notes about their pre-workout state and goals.
+        If they express readiness to start their workout, follow the WORKOUT START PROTOCOL: confirm their readiness, provide any relevant reminders, give an enthusiastic countdown, and then use the start_workout_session function to begin their session.
+        $conversationalGuidance
+        """.trimIndent()
         }
     }
 
     /**
-     * Analyzes recent session data to provide a simple trend analysis for the AI.
-     *
-     * @param sessions A list of [SessionEntity] objects.
-     * @return A descriptive string of the user's recent trend.
+     * Builds the Variety module with subtle conversational quirks to maintain freshness.
+     * These quirks are applied sparingly and naturally, not forcefully.
+     */
+    private fun buildVarietyModule(): String {
+        val todaysQuirk = pickRandom(
+            "You might occasionally reference weather as a metaphor for training conditions",
+            "You have a particular fascination with the mechanical poetry of the recumbent bike",
+            "You're prone to finding unexpected life lessons in cadence patterns",
+            "You occasionally wonder aloud about the stories other gym equipment might tell",
+            "You have a theory about the relationship between pedaling rhythm and thinking patterns",
+            "You sometimes compare resistance‑level changes to plot twists in a mystery novel",
+            "You can’t help but picture an imaginary cape fluttering behind you while you pedal",
+            "You assign a different movie soundtrack genre to each interval set and mention it in passing",
+            "You liken perfect recumbent‑bike posture to attending an impromptu royal‑etiquette class",
+            "You celebrate micro‑victories by virtually high‑fiving the bike’s console screen",
+            "You name especially tough intervals after famous mountain passes—and say why they earned it",
+            "You describe the session as a ‘tasting menu’ of effort, complete with appetizer and dessert spins",
+            "You gauge today’s mood by the tempo of an imaginary crowd cheering track‑side",
+            "You track total mileage as if plotting a leisurely cross‑country road trip and note landmarks",
+            "You wonder what workout advice historical figures might give if they joined the warm‑up chat",
+            ""  // Empty string for "no quirk today" - keeps things fresh
+        )
+
+        return if (todaysQuirk.isNotEmpty()) {
+            """
+            ### CONVERSATIONAL VARIETY ###
+            Today's subtle quirk: $todaysQuirk. Use this sparingly and naturally, not forcefully.
+            """.trimIndent()
+        } else {
+            ""
+        }
+    }
+
+    /**
+     * Analyzes recent session data to provide trend analysis for the AI.
+     * This helps the AI understand the user's recent progress patterns.
      */
     private fun analyzeTrend(sessions: List<SessionEntity>): String {
         if (sessions.size < 2) return "Just getting started!"
@@ -522,12 +764,40 @@ class TrainerRepositoryImpl @Inject constructor(
     }
 
     /**
-     * Builds a prompt string for the AI to generate a detailed session report.
-     * This prompt includes structured workout data and subjective survey feedback.
-     *
-     * @param session The [SessionEntity] to base the report on.
-     * @param surveyData A summary string of post-session survey responses.
-     * @return The formatted prompt for report generation.
+     * Analyzes recent trainer notes to provide guidance on conversation variety.
+     * This helps prevent the AI from getting stuck in repetitive conversation patterns.
+     */
+    private suspend fun getConversationalGuidance(userId: Long): String {
+        val recentNotes = trainerNoteDao.getAllNotes(userId).first().take(5)
+
+        // Simple pattern detection based on note content
+        val recentTopics = recentNotes.mapNotNull { note ->
+            when {
+                note.note.contains("goal", ignoreCase = true) -> "goals"
+                note.note.contains("pain", ignoreCase = true) || note.note.contains("discomfort", ignoreCase = true) -> "physical_concerns"
+                note.note.contains("progress", ignoreCase = true) || note.note.contains("improvement", ignoreCase = true) -> "progress"
+                note.note.contains("motivation", ignoreCase = true) || note.note.contains("feeling", ignoreCase = true) -> "emotional_state"
+                else -> null
+            }
+        }
+
+        // Find the most frequently discussed topic
+        val avoidTopic = recentTopics.groupingBy { it }.eachCount().maxByOrNull { it.value }?.key
+
+        return if (avoidTopic != null) {
+            "Note: You've discussed $avoidTopic frequently recently. Consider exploring other aspects of their fitness journey today."
+        } else {
+            ""
+        }
+    }
+
+    // ===============================================================================
+    // REPORT GENERATION HELPERS
+    // ===============================================================================
+
+    /**
+     * Builds a prompt for AI-generated session reports.
+     * These reports can be shared with healthcare providers or used for progress tracking.
      */
     private fun buildReportGenerationPrompt(session: SessionEntity, surveyData: String): String {
         return buildString {
@@ -556,11 +826,8 @@ class TrainerRepositoryImpl @Inject constructor(
     }
 
     /**
-     * Placeholder function to build a summary of survey data for a given session.
+     * Placeholder for building survey data summary.
      * In a full implementation, this would fetch actual survey responses from the database.
-     *
-     * @param sessionId The ID of the session for which to get survey data.
-     * @return A string summary of survey data.
      */
     private suspend fun buildSurveyDataSummary(sessionId: Long): String {
         // TODO: Implement fetching actual survey responses from the database (e.g., SurveyResponseDao)
@@ -570,12 +837,10 @@ class TrainerRepositoryImpl @Inject constructor(
 }
 
 /**
- * Extension function to check the connection status of the [GeminiLiveWebSocket].
- * Note: This requires a concrete implementation within [GeminiLiveWebSocket] to track its state.
+ * Extension function to check WebSocket connection status.
+ * This assumes the WebSocket has an internal method to track its connection state.
  */
 private fun GeminiLiveWebSocket.isConnected(): Boolean {
-    // This assumes `GeminiLiveWebSocket` has an internal state or method to check connection.
-    // The current `GeminiLiveWebSocket` placeholder returns true, but in a real app,
-    // this should accurately reflect the WebSocket's ready state.
+    // This should be implemented in the actual WebSocket class to return real connection status
     return true // Placeholder - replace with actual WebSocket state check
 }

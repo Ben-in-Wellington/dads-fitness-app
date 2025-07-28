@@ -1,3 +1,5 @@
+// SettingsViewModel.kt
+
 package com.di.feature_session
 
 import androidx.lifecycle.ViewModel

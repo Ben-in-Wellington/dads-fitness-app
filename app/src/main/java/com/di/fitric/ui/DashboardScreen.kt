@@ -167,8 +167,12 @@ private fun DashboardContent(
     trainerOverlayInfo?.let { (sid, post) ->
         TrainerOverlay(
             workoutSessionId = sid,
-            isPostWorkout    = post,
-            onDismiss        = { trainerOverlayInfo = null }
+            isPostWorkout = post,
+            onDismiss = { trainerOverlayInfo = null },
+            onStartSession = {
+                // Start the session when AI triggers it
+                sessionViewModel.startSession()
+            }
         )
     }
 }

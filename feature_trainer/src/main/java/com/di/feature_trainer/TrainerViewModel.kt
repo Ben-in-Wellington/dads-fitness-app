@@ -21,11 +21,13 @@ import com.di.feature_trainer.data.models.ToolCall
 import com.di.feature_trainer.tools.TrainerTools
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.util.UUID
@@ -45,8 +47,8 @@ class TrainerViewModel @Inject constructor(
     private val _ui = MutableStateFlow(TrainerUiState())
     val uiState: StateFlow<TrainerUiState> = _ui.asStateFlow()
 
-    private var currentTrainerSession: TrainerSessionEntity? = null
     private var currentWorkoutSessionId: Long? = null
+    private var isPostWorkout: Boolean = false
 
     /* ─────────────────── init subscriptions ─────────────────── */
     init {
@@ -82,18 +84,27 @@ class TrainerViewModel @Inject constructor(
 
     /* ─────────────────── lifecycle helpers ─────────────────── */
 
-    fun startPreWorkoutChat(workoutSessionId: Long?) =
-        startConversation(workoutSessionId, isPost = false)
+    fun startPreWorkoutChat(workoutSessionId: Long?) {
+        currentWorkoutSessionId = workoutSessionId
+        isPostWorkout = false
+        startFreshConversation()
+    }
 
-    fun startPostWorkoutDebrief(workoutSessionId: Long?) =
-        startConversation(workoutSessionId, isPost = true)
+    fun startPostWorkoutDebrief(workoutSessionId: Long?) {
+        currentWorkoutSessionId = workoutSessionId
+        isPostWorkout = true
+        startFreshConversation()
+    }
 
-    private fun startConversation(workoutSessionId: Long?, isPost: Boolean) {
+    private fun startFreshConversation() {
         viewModelScope.launch {
-            if (_ui.value.conversationState == ConversationState.CONNECTING) return@launch
+            if (_ui.value.conversationState == ConversationState.CONNECTING) {
+                Log.d(TAG, "Already connecting, ignoring duplicate request")
+                return@launch
+            }
 
+            // Reset state completely
             _ui.value = TrainerUiState(conversationState = ConversationState.CONNECTING)
-            currentWorkoutSessionId = workoutSessionId
 
             val userId = userManager.activeUser.first()?.id
             if (userId == null) {
@@ -102,23 +113,48 @@ class TrainerViewModel @Inject constructor(
             }
 
             try {
-                val handle = workoutSessionId?.let {
-                    trainerSessionDao.getActiveTrainerSession(it)?.geminiSessionHandle
-                }
+                Log.d(TAG, "Starting fresh ${if (isPostWorkout) "post-workout" else "pre-workout"} session")
 
-                currentTrainerSession = trainerRepository.startSession(
-                    userId, workoutSessionId, handle, isPost
+                // Always pass null for session handle - start fresh
+                trainerRepository.startSession(
+                    userId = userId,
+                    workoutSessionId = currentWorkoutSessionId,
+                    sessionHandle = null,  // Always fresh
+                    isPostWorkoutDebrief = isPostWorkout
                 )
             } catch (e: Exception) {
+                Log.e(TAG, "Failed to start conversation", e)
                 _ui.update {
                     it.copy(
-                        error = "Failed to start conversation: ${e.message}",
+                        error = "Failed to start: ${e.message}",
                         conversationState = ConversationState.ERROR
                     )
                 }
             }
         }
     }
+
+    fun restartConversation() {
+        viewModelScope.launch {
+            stopConversation()
+            delay(500)
+            startFreshConversation()
+        }
+    }
+
+    fun stopConversation() {
+        viewModelScope.launch {
+            runCatching { trainerRepository.sendAudioStreamEnd() }
+        }
+        audioManager.release()
+        trainerRepository.disconnect()
+
+        // Clear everything
+        currentWorkoutSessionId = null
+        isPostWorkout = false
+        _ui.value = TrainerUiState()
+    }
+
 
     fun concludeDebriefAndSaveNote() {
         viewModelScope.launch {
@@ -132,13 +168,14 @@ class TrainerViewModel @Inject constructor(
         }
     }
 
-    fun stopConversation() {
-        viewModelScope.launch {
-            runCatching { trainerRepository.sendAudioStreamEnd() }
+    fun toggleMute() {
+        val currentMuted = _ui.value.isMuted
+        if (currentMuted) {
+            audioManager.unMuteMic()
+        } else {
+            audioManager.muteMic()
         }
-        audioManager.release() // This will now properly clean everything up
-        trainerRepository.disconnect()
-        _ui.value = TrainerUiState()
+        _ui.update { it.copy(isMuted = !currentMuted) }
     }
 
     override fun onCleared() {
@@ -147,19 +184,18 @@ class TrainerViewModel @Inject constructor(
     }
 
     /* ─────────────────── Live-API event handler ─────────────────── */
-    private fun handleApiEvent(ev: LiveApiEvent) {
+    private suspend fun handleApiEvent(ev: LiveApiEvent) {
         when (ev) {
             LiveApiEvent.ConnectionOpened -> {
-                Log.d(TAG, "Connection opened")
+                Log.d(TAG, "Connection opened - initializing audio")
                 _ui.update { it.copy(conversationState = ConversationState.ACTIVE) }
+
+                // Always initialize audio playback, even for resumed sessions
                 audioManager.initializePlayback()
                 audioManager.startRecording()
                 _ui.update { it.copy(isListening = true) }
-                viewModelScope.launch {
-                    trainerRepository.sendTextMessage(
-                        "<SYSTEM_TRIGGER>Please begin with a greeting.</SYSTEM_TRIGGER>", true
-                    )
-                }
+
+                trainerRepository.sendTextMessage("", turnComplete = true)
             }
 
             LiveApiEvent.ConnectionClosed -> stopConversation()
@@ -181,7 +217,7 @@ class TrainerViewModel @Inject constructor(
             }
 
             is LiveApiEvent.UserTranscriptUpdated -> {
-                updateUserTranscript(ev.text, ev.isFinal) // Add user's speech to the transcript
+                // Simply ignore user transcripts or just update listening state
                 if (ev.isFinal) {
                     _ui.update { it.copy(isListening = false) }
                 }
@@ -189,7 +225,6 @@ class TrainerViewModel @Inject constructor(
 
             is LiveApiEvent.AiTranscriptUpdated -> {
                 updateAssistantTranscript(ev.text, ev.isFinal)
-                // Don't manage speaking/listening state here anymore
             }
 
             /* tools */
@@ -197,19 +232,14 @@ class TrainerViewModel @Inject constructor(
 
             /* session handle */
             is LiveApiEvent.SessionHandleUpdated -> {
-                currentTrainerSession?.let { s ->
-                    viewModelScope.launch {
-                        trainerRepository.updateSessionHandle(s.id, ev.handle)
-                        currentTrainerSession = s.copy(geminiSessionHandle = ev.handle)
-                    }
-                }
+                // Ignore - we're not resuming sessions anymore
+                Log.d(TAG, "Received session handle but ignoring (using fresh sessions)")
             }
 
             /* GoAway → auto-reconnect so Dad never notices 10-min resets */
             is LiveApiEvent.GoAway -> {
-                Log.d(TAG, "Server reset in ${ev.timeLeft} → reconnecting")
-                trainerRepository.disconnect()
-                startConversation(currentWorkoutSessionId, isPost = false)
+                Log.d(TAG, "Server requesting disconnect in ${ev.timeLeft}")
+                // Don't auto-reconnect - let the user finish their workout
             }
 
             /* error */
@@ -226,12 +256,29 @@ class TrainerViewModel @Inject constructor(
     }
 
     /* ─────────────────── tool execution ─────────────────── */
+
+    private val _navigationEvents = Channel<TrainerNavigationEvent>()
+    val navigationEvents = _navigationEvents.receiveAsFlow()
+
+    sealed class TrainerNavigationEvent {
+        object StartWorkoutSession : TrainerNavigationEvent()
+    }
+
     private fun executeTool(toolCall: ToolCall) {
         viewModelScope.launch(Dispatchers.IO) {
             _ui.update { it.copy(isExecutingTool = true) }
             try {
+                // Check if this is the start workout tool
+                val hasStartWorkout = toolCall.functionCalls.any { it.name == "start_workout_session" }
+
                 val resp = trainerTools.executeTool(toolCall)
                 trainerRepository.sendToolResponse(resp)
+
+                // If it was the start workout tool, trigger navigation after a brief delay
+                if (hasStartWorkout) {
+                    delay(1500) // Give time for the AI to say goodbye
+                    _navigationEvents.send(TrainerNavigationEvent.StartWorkoutSession)
+                }
             } catch (e: Exception) {
                 _ui.update { it.copy(error = "Tool failed: ${e.message}") }
             } finally {
@@ -273,17 +320,27 @@ class TrainerViewModel @Inject constructor(
         _ui.update { currentState ->
             val transcript = currentState.transcript.toMutableList()
 
-            // Find the last message from the AI that is not yet final
+            // Find the last AI message that is not yet final
             val lastAiEntryIndex = transcript.findLastIndex { !it.isUser && !it.isFinal }
 
             if (lastAiEntryIndex != -1) {
-                // If we found an in-progress AI message, update it
-                transcript[lastAiEntryIndex] = transcript[lastAiEntryIndex].copy(
-                    text = text, // The API sends the full updated text, so we just replace it
+                val existingEntry = transcript[lastAiEntryIndex]
+                // IMPORTANT: For incremental updates, we need to check if this is new content
+                // The API might send the same content multiple times
+                val updatedText = if (text.startsWith(existingEntry.text)) {
+                    // This is a continuation - the API sent the full text including what we already have
+                    text
+                } else {
+                    // This is additional content - append it
+                    existingEntry.text + text
+                }
+
+                transcript[lastAiEntryIndex] = existingEntry.copy(
+                    text = updatedText,
                     isFinal = isFinal
                 )
             } else {
-                // Otherwise, this is a new message from the AI
+                // This is a new message from the AI
                 transcript.add(
                     TranscriptEntry(text = text, isUser = false, isFinal = isFinal)
                 )
@@ -313,7 +370,8 @@ data class TrainerUiState(
     val isSpeaking: Boolean = false,
     val isExecutingTool: Boolean = false,
     val transcript: List<TranscriptEntry> = emptyList(),
-    val error: String? = null
+    val error: String? = null,
+    val isMuted: Boolean = false
 )
 
 enum class ConversationState { IDLE, CONNECTING, ACTIVE, ERROR }

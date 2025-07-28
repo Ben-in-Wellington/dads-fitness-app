@@ -6,6 +6,7 @@
 //
 package com.di.feature_trainer.data.models
 
+import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
@@ -31,6 +32,7 @@ data class LiveSessionConfig(
     val contextWindowCompression: ContextWindowCompression = ContextWindowCompression(),
     val inputAudioTranscription: EmptyObject = EmptyObject(),
     val outputAudioTranscription: EmptyObject = EmptyObject(),
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
     val sessionResumption: SessionResumptionConfig? = null
 )
 
@@ -197,9 +199,19 @@ data class FunctionCall(
 /* ─────────────  USAGE / SESSION META  ───────────── */
 @Serializable
 data class UsageMetadata(
-    val totalTokenCount: Int,
+    val totalTokenCount: Int? = null,  // Make nullable with default
     val promptTokenCount: Int? = null,
-    val candidatesTokenCount: Int? = null
+    val candidatesTokenCount: Int? = null,
+    val promptTokensDetails: List<ModalityTokenCount>? = null,
+    val cacheTokensDetails: List<ModalityTokenCount>? = null,
+    val responseTokensDetails: List<ModalityTokenCount>? = null,
+    val toolUsePromptTokensDetails: List<ModalityTokenCount>? = null
+)
+
+@Serializable
+data class ModalityTokenCount(
+    val modality: String,
+    val tokenCount: Int
 )
 
 @Serializable
