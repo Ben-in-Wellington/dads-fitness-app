@@ -24,10 +24,12 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
+      # ✱ Write the key exactly as Gradle expects
       - name: Inject Gemini API key
         shell: bash
         run: |
-          echo 'GEMINI_API_KEY="${{ secrets.GEMINI_API_KEY }}"' >> local.properties
+          echo "gemini.api.key=${{ secrets.GEMINI_API_KEY }}" >> local.properties
+          cat local.properties    # optional debug; delete once it works
 
       - name: Assemble debug APK
         run: ./gradlew assembleDebug --no-daemon
