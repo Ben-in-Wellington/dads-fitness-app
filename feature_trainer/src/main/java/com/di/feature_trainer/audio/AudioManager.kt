@@ -198,22 +198,33 @@ class AudioManager @Inject constructor() {
         Log.d(TAG, "🔇 Playback stopped and flushed.")
     }
 
-    // 5. MODIFY `release` to be the only place that destroys resources
     fun release() {
-        scope.cancel() // Cancel all coroutines in this scope
-        stopRecordingInternal()
-
-        // Now it's safe to release the speaker
+        // ── 1. Stop mic capture ───────────────────────────────────────────────
+        stopRecordingInternal()                // cancels recJob + releases AudioRecord
+    
+        // ── 2. Stop playback coroutine but keep the scope alive ───────────────
         playJob?.cancel()
+        playJob = null
+    
+        // ── 3. Drain any leftover audio from the queue (don’t close it) ───────
+        while (playQueue.tryReceive().isSuccess) { /* drop stale PCM */ }
+    
+        // ── 4. Flush & release the AudioTrack safely ──────────────────────────
         speaker?.runCatching {
             if (state == AudioTrack.STATE_INITIALIZED) {
+                pause()
+                flush()
                 stop()
                 release()
             }
         }
         speaker = null
-        playQueue.close()
-        Log.d(TAG, "AudioManager released all resources.")
+    
+        // ── 5. Reset flags so next session starts clean ───────────────────────
+        _isSpeaking.value = false
+        micMuted = false
+    
+        Log.d(TAG, "AudioManager reset – ready for next session.")
     }
 
     private fun err(msg: String) {
