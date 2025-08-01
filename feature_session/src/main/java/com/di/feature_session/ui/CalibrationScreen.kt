@@ -193,7 +193,7 @@ fun CalibrationScreen(
                             Button(
                                 onClick = {
                                     customCircumference.toDoubleOrNull()?.let {
-                                        if (it in 1.5..3.0) {
+                                        if (it in 0.1..5.0) {
                                             viewModel.setWheelCircumference(it)
                                             showCustomInput = false
                                         }
@@ -205,7 +205,7 @@ fun CalibrationScreen(
                         }
 
                         Text(
-                            text = "Typical range: 1.5m - 3.0m",
+                            text = "Valid range: 0.10m – 5.0m",
                             fontSize = 12.sp,
                             color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.7f),
                             modifier = Modifier.padding(top = 8.dp)
