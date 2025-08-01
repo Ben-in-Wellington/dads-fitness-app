@@ -1,4 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
-<bitmap xmlns:android="http://schemas.android.com/apk/res/android"
-    android:src="@mipmap/ic_launcher"
-    android:gravity="center"/>
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Solid colour or 432 × 432 PNG -->
+    <background android:drawable="@color/ic_launcher_bg"/>
+
+    <!-- The foreground PNG you provide in each density -->
+    <foreground android:drawable="@mipmap/ic_launcher_foreground"/>
+
+    <!-- Optional monochrome layer for Android 13+ -->
+    <monochrome android:drawable="@mipmap/ic_launcher_foreground"/>
+</adaptive-icon>
